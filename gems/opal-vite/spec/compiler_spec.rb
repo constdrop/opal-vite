@@ -45,16 +45,18 @@ RSpec.describe Opal::Vite::Compiler do
           helper_path = File.join(dir, 'helper.rb')
           File.write(helper_path, 'class Helper; end')
 
-          # Create main file that requires helper
+          # Create main file that requires helper (the file's directory is
+          # added to the load path by the compiler)
           main_source = "require 'helper'\nputs Helper"
+          main_path = File.join(dir, 'main.rb')
 
-          # Configure load paths
-          builder = Opal::Builder.new
-          builder.append_paths(dir)
+          result = compiler.compile(main_source, main_path)
 
-          result = compiler.compile(main_source, File.join(dir, 'main.rb'))
-
-          expect(result[:dependencies]).to include('helper')
+          # Dependencies list every processed file: required files by their
+          # load-path-relative name and the entry by the path it was given.
+          # The Vite plugin resolves both forms (resolveDependencyPath).
+          expect(result[:dependencies]).to include(main_path)
+          expect(result[:dependencies]).to include(a_string_ending_with('helper.rb'))
         end
       end
     end
@@ -126,7 +128,8 @@ RSpec.describe Opal::Vite::Compiler do
         result = compiler.compile(source, 'empty.rb')
 
         expect(result[:code]).to be_a(String)
-        expect(result[:dependencies]).to be_empty
+        # Only the entry itself
+        expect(result[:dependencies]).to eq(['empty.rb'])
       end
     end
   end
@@ -166,6 +169,43 @@ RSpec.describe Opal::Vite::Compiler do
 
     it 'marks opal itself as loaded so bundles can require it' do
       expect(described_class.runtime_code).to include('Opal.loaded(["opal"])')
+    end
+  end
+
+  describe 'built-in concerns' do
+    node_available = system('node --version', out: File::NULL, err: File::NULL)
+
+    opal_dir = File.expand_path('../opal', __dir__)
+
+    Dir[File.join(opal_dir, 'opal_vite', 'concerns', '**', '*.rb')].sort.each do |path|
+      name = path.delete_prefix("#{opal_dir}/").delete_suffix('.rb')
+
+      it "compiles #{name} to syntactically valid JavaScript" do
+        skip 'node is not installed' unless node_available
+
+        result = described_class.new.compile("require '#{name}'", 'entry.rb')
+        Tempfile.create(['concern', '.js']) do |file|
+          file.write(result[:code])
+          file.flush
+          output = `node --check #{file.path} 2>&1`
+          expect($?.success?).to be(true), output
+        end
+      end
+    end
+  end
+
+  describe 'include_concerns option' do
+    let(:source) { "require 'opal_vite/concerns/v1/base64_helpers'" }
+
+    it 'makes the built-in concerns requirable by default' do
+      expect { described_class.new.compile(source, 'entry.rb') }.not_to raise_error
+    end
+
+    it 'leaves the built-in concerns out of the load path when disabled' do
+      # MissingRequire is a LoadError, so #compile's `rescue StandardError`
+      # does not wrap it in CompilationError.
+      expect { described_class.new(include_concerns: false).compile(source, 'entry.rb') }
+        .to raise_error(Opal::Builder::MissingRequire, %r{opal_vite/concerns/v1/base64_helpers})
     end
   end
 end

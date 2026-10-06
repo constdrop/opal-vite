@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest'
 import { OpalCompiler } from '../src/compiler'
 import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
+import { EventEmitter } from 'events'
 
 // Path to local gem for testing (monorepo structure)
 const LOCAL_GEM_PATH = path.resolve(__dirname, '../../../gems/opal-vite')
@@ -666,6 +667,116 @@ describe('OpalCompiler Performance Features', () => {
 
       // Bad file should not be in results
       expect(results.has(badFile)).toBe(false)
+    })
+  })
+})
+
+describe('OpalCompiler Ruby process I/O', () => {
+  let tempDir: string
+
+  beforeAll(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opal-io-test-'))
+  })
+
+  afterAll(() => {
+    if (fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true })
+    }
+  })
+
+  describe('getCompilerScript', () => {
+    const getScript = (options: ConstructorParameters<typeof OpalCompiler>[0]): string => {
+      const compiler = new OpalCompiler({ diskCache: false, gemPath: LOCAL_GEM_PATH, ...options })
+      return (compiler as any).getCompilerScript()
+    }
+
+    it('generates a single-line script so `ruby -e` is not truncated on Windows', () => {
+      const script = getScript({})
+
+      expect(script).not.toContain('\n')
+      expect(script).not.toContain('\r')
+      expect(script).toBe(script.trim())
+    })
+
+    it('separates statements with semicolons and reads the file path from ARGV', () => {
+      const script = getScript({})
+
+      expect(script).toMatch(/^file_path = ARGV\[0\]; stubs = \[\]; Opal::Vite\.compile_for_vite\(/)
+    })
+
+    it('embeds includeConcerns, sourceMap and stubs options', () => {
+      const script = getScript({
+        includeConcerns: false,
+        sourceMap: false,
+        stubs: ['active_support', 'pg']
+      })
+
+      expect(script).toContain('stubs = ["active_support","pg"];')
+      expect(script).toContain('include_concerns: false')
+      expect(script).toContain('source_map: false')
+      expect(script).toContain('stubs: stubs)')
+    })
+
+    it('uses default option values when not specified', () => {
+      const script = getScript({})
+
+      expect(script).toContain('include_concerns: true')
+      expect(script).toContain('source_map: true')
+    })
+  })
+
+  describe('Ruby process spawning (mocked cross-spawn)', () => {
+    type FakeChild = EventEmitter & { stdout: EventEmitter; stderr: EventEmitter }
+
+    const createSpawnMock = (stdout: string) =>
+      vi.fn((): FakeChild => {
+        const child = new EventEmitter() as FakeChild
+        child.stdout = new EventEmitter()
+        child.stderr = new EventEmitter()
+        setImmediate(() => {
+          child.stdout.emit('data', Buffer.from(stdout))
+          child.emit('close', 0)
+        })
+        return child
+      })
+
+    // Load a fresh copy of the compiler module bound to a mocked cross-spawn,
+    // leaving the top-level OpalCompiler import (used by real Ruby tests) untouched.
+    const loadCompilerWith = async (spawnMock: ReturnType<typeof createSpawnMock>) => {
+      vi.resetModules()
+      vi.doMock('cross-spawn', () => ({ default: spawnMock }))
+      const mod = await import('../src/compiler')
+      return new mod.OpalCompiler({ diskCache: false, useBundler: false, gemPath: LOCAL_GEM_PATH })
+    }
+
+    let testFile: string
+
+    beforeEach(() => {
+      testFile = path.join(tempDir, `spawn_${Date.now()}_${Math.random().toString(36).slice(2)}.rb`)
+      fs.writeFileSync(testFile, 'puts "spawn test"')
+    })
+
+    afterEach(() => {
+      vi.doUnmock('cross-spawn')
+      vi.resetModules()
+    })
+
+    it('passes the compiler script as a single -e argument without newlines', async () => {
+      const spawnMock = createSpawnMock(JSON.stringify({ code: 'compiled', dependencies: [] }))
+      const compiler = await loadCompilerWith(spawnMock)
+
+      await compiler.compile(testFile)
+
+      expect(spawnMock).toHaveBeenCalledTimes(1)
+      const [command, args] = spawnMock.mock.calls[0] as unknown as [string, string[]]
+      expect(command).toBe('ruby')
+
+      const eIndex = args.indexOf('-e')
+      expect(eIndex).toBeGreaterThanOrEqual(0)
+      const script = args[eIndex + 1]
+      expect(script).not.toContain('\n')
+      expect(script).toContain('Opal::Vite.compile_for_vite(')
+      expect(args[args.length - 1]).toBe(testFile)
     })
   })
 })

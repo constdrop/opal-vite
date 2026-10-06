@@ -865,11 +865,8 @@ export class OpalCompiler {
     const stubs = JSON.stringify(this.options.stubs)
     // Note: opal-vite is already required via -r flag or -I flag
     // The $LOAD_PATH is set up by -I option, so require 'opal-vite' will find it
-    return `
-      file_path = ARGV[0]
-      stubs = ${stubs}
-      Opal::Vite.compile_for_vite(file_path, include_concerns: ${includeConcerns}, source_map: ${sourceMap}, stubs: stubs)
-    `.trim()
+    // Must be a single line using semicolons to prevent argument truncation on Windows when passed via `ruby -e`.
+    return `file_path = ARGV[0]; stubs = ${stubs}; Opal::Vite.compile_for_vite(file_path, include_concerns: ${includeConcerns}, source_map: ${sourceMap}, stubs: stubs)`;
   }
 
   private resolveGemLibPath(): string {

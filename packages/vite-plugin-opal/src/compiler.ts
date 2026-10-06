@@ -495,7 +495,15 @@ export class OpalCompiler {
     // output may not reflect its latest content (TOCTOU). Recording that newer
     // mtime would make the stale output look fresh, so skip caching entirely
     // and let the next compile produce (and cache) a correct result.
-    const racedDuringCompile = Object.values(depMtimes).some((m) => m > compileStart)
+    //
+    // The entry file itself is also reported as a dependency. Its mtime was
+    // already captured by `stat` above, so compare against that instead of the
+    // wall clock: on Windows a freshly written file's mtime can slightly exceed
+    // Date.now(), which would otherwise be misread as a mid-compile edit.
+    const entryKey = normalizePath(path.resolve(filePath))
+    const racedDuringCompile = Object.entries(depMtimes).some(([abs, m]) =>
+      abs === entryKey ? m !== stat.mtimeMs : m > compileStart
+    )
     if (racedDuringCompile) {
       this.log(`Dependency changed during compilation of ${filePath}; not caching`)
       this.recordMetrics(filePath, startTime, false, 'compile')

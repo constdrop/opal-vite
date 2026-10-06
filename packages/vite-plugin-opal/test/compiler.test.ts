@@ -486,6 +486,32 @@ describe('OpalCompiler Performance Features', () => {
 
       fs.rmSync(dir, { recursive: true })
     })
+
+    it('still caches when the entry file mtime is slightly ahead of the wall clock', async () => {
+      // On Windows a freshly written file's mtime can exceed Date.now() by a
+      // few ms. Since the entry file is itself reported as a dependency, the
+      // mid-compile edit guard must not mistake that skew for a real edit.
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opal-dep-skew-'))
+      const dcache = path.join(dir, 'cache')
+      const entry = path.join(dir, 'skewed.rb')
+      fs.writeFileSync(entry, 'puts "skewed"')
+      const future = new Date(Date.now() + 60_000)
+      fs.utimesSync(entry, future, future)
+
+      const compiler = new OpalCompiler({
+        diskCache: true, cacheDir: dcache, metrics: true, gemPath: LOCAL_GEM_PATH
+      })
+
+      await compiler.compile(entry)
+      expect(compiler.getDiskCacheStats().files).toBeGreaterThan(0)
+
+      await compiler.compile(entry)
+      const summary = compiler.getMetricsSummary()
+      expect(summary.compiled).toBe(1)
+      expect(summary.cached).toBe(1)
+
+      fs.rmSync(dir, { recursive: true })
+    })
   })
 
   describe('stubs', () => {
@@ -728,13 +754,14 @@ describe('OpalCompiler Ruby process I/O', () => {
   describe('Ruby process spawning (mocked cross-spawn)', () => {
     type FakeChild = EventEmitter & { stdout: EventEmitter; stderr: EventEmitter }
 
-    const createSpawnMock = (stdout: string) =>
+    const createSpawnMock = (stdout: string, beforeClose?: () => void) =>
       vi.fn((): FakeChild => {
         const child = new EventEmitter() as FakeChild
         child.stdout = new EventEmitter()
         child.stderr = new EventEmitter()
         setImmediate(() => {
           child.stdout.emit('data', Buffer.from(stdout))
+          beforeClose?.()
           child.emit('close', 0)
         })
         return child
@@ -777,6 +804,37 @@ describe('OpalCompiler Ruby process I/O', () => {
       expect(script).not.toContain('\n')
       expect(script).toContain('Opal::Vite.compile_for_vite(')
       expect(args[args.length - 1]).toBe(testFile)
+    })
+
+    it('does not cache when the entry file is edited while Ruby is compiling', async () => {
+      // Ruby reports the entry file itself among the dependencies.
+      const output = JSON.stringify({ code: 'compiled', dependencies: [testFile] })
+      const past = new Date('2020-01-01T00:00:00Z')
+      fs.utimesSync(testFile, past, past)
+
+      const spawnMock = createSpawnMock(output, () => {
+        // Simulate an edit landing mid-compile by bumping the entry's mtime.
+        const later = new Date('2020-06-01T00:00:00Z')
+        fs.utimesSync(testFile, later, later)
+      })
+      const compiler = await loadCompilerWith(spawnMock)
+
+      await compiler.compile(testFile)
+      await compiler.compile(testFile)
+
+      // Second compile must hit Ruby again instead of a stale cache entry
+      expect(spawnMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('caches when the entry file is untouched during compilation', async () => {
+      const output = JSON.stringify({ code: 'compiled', dependencies: [testFile] })
+      const spawnMock = createSpawnMock(output)
+      const compiler = await loadCompilerWith(spawnMock)
+
+      await compiler.compile(testFile)
+      await compiler.compile(testFile)
+
+      expect(spawnMock).toHaveBeenCalledTimes(1)
     })
   })
 })

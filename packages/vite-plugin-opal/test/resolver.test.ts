@@ -33,7 +33,7 @@ describe('OpalResolver', () => {
 
   describe('resolve', () => {
     it('resolves absolute paths', async () => {
-      const absolutePath = path.join(tempDir, 'main.rb')
+      const absolutePath = path.join(tempDir, 'main.rb').replace(/\\/g, '/')
       const result = await resolver.resolve(absolutePath)
 
       expect(result).toBe(absolutePath)
@@ -43,25 +43,25 @@ describe('OpalResolver', () => {
       const importer = path.join(tempDir, 'main.rb')
       const result = await resolver.resolve('./lib/helper.rb', importer)
 
-      expect(result).toBe(path.join(tempDir, 'lib', 'helper.rb'))
+      expect(result).toBe(path.join(tempDir, 'lib', 'helper.rb').replace(/\\/g, '/'))
     })
 
     it('resolves from load paths', async () => {
       const result = await resolver.resolve('helper')
 
-      expect(result).toBe(path.join(tempDir, 'lib', 'helper.rb'))
+      expect(result).toBe(path.join(tempDir, 'lib', 'helper.rb').replace(/\\/g, '/'))
     })
 
     it('resolves with .rb extension', async () => {
       const result = await resolver.resolve('helper.rb')
 
-      expect(result).toBe(path.join(tempDir, 'lib', 'helper.rb'))
+      expect(result).toBe(path.join(tempDir, 'lib', 'helper.rb').replace(/\\/g, '/'))
     })
 
     it('resolves nested paths', async () => {
       const result = await resolver.resolve('utils/formatter')
 
-      expect(result).toBe(path.join(tempDir, 'lib', 'utils', 'formatter.rb'))
+      expect(result).toBe(path.join(tempDir, 'lib', 'utils', 'formatter.rb').replace(/\\/g, '/'))
     })
 
     it('returns null for non-existent files', async () => {
@@ -110,7 +110,7 @@ describe('OpalResolver', () => {
 
       const result = await resolver.resolve('special-file')
 
-      expect(result).toBe(specialFile)
+      expect(result).toBe(specialFile.replace(/\\/g, '/'))
 
       // Clean up
       fs.unlinkSync(specialFile)
